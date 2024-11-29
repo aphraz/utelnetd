@@ -77,7 +77,7 @@ extern char *ptsname (int fd);
 
 #ifdef BSD
 #define XTABS OXTABS
-#define getpt() posix_openpt(O_RDWR|O_NOCTTY)
+#define getpty() posix_openpt(O_RDWR|O_NOCTTY)
 #endif
 
 #ifdef DEBUG
@@ -231,7 +231,7 @@ static int getpty(char *line)
 {
         int p;
 
-        p = getpt();
+        p = getpty();
         if (p < 0) {
                 DEBUG_OUT("getpty(): couldn't get pty\n");
                 close(p);
