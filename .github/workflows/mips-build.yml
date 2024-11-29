@@ -47,7 +47,7 @@ jobs:
       # Step 6: Set Cross-Compiler Prefix
       - name: Set Cross-Compiler Prefix
         run: |
-          echo "CROSS_PREFIX=mips-openwrt-linux-musl-" >> $GITHUB_ENV
+          echo "CROSS_PREFIX=mipsel-openwrt-linux-musl-" >> $GITHUB_ENV
 
       # Step 7: Verify Cross-Compiler Exists
       - name: Verify Cross-Compiler
