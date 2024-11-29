@@ -49,7 +49,18 @@ jobs:
         run: |
           echo "CROSS_PREFIX=mips-openwrt-linux-musl-" >> $GITHUB_ENV
 
-      # Step 7: Compile utelnetd.c into standalone binary
+      # Step 7: Verify Cross-Compiler Exists
+      - name: Verify Cross-Compiler
+        run: |
+          echo "Verifying cross-compiler exists..."
+          ls -la $TOOLCHAIN_DIR
+          if [ ! -f "${TOOLCHAIN_DIR}/${CROSS_PREFIX}gcc" ]; then
+            echo "Cross-compiler ${CROSS_PREFIX}gcc not found in TOOLCHAIN_DIR."
+            exit 1
+          fi
+          echo "Cross-compiler found: $(which ${CROSS_PREFIX}gcc)"
+
+      # Step 8: Compile utelnetd.c into standalone binary
       - name: Compile utelnetd.c
         run: |
           ${CROSS_PREFIX}gcc utelnetd.c -o utelnetd \
@@ -60,19 +71,20 @@ jobs:
             -fomit-frame-pointer \
             -flto
 
-      # Step 8: Strip the binary to reduce size
+      # Step 9: Strip the binary to reduce size
       - name: Strip the utelnetd binary
         run: |
           ${CROSS_PREFIX}strip --strip-unneeded utelnetd
 
-      # Step 9: Verify the binary
+      # Step 10: Verify the binary
       - name: Verify Binary
         run: |
+          echo "Verifying the compiled binary..."
           file utelnetd
           readelf -d utelnetd | grep NEEDED
           ls -lh utelnetd
 
-      # Step 10: Upload the compiled binary as an artifact
+      # Step 11: Upload the compiled binary as an artifact
       - name: Upload utelnetd Binary
         uses: actions/upload-artifact@v3
         with:
