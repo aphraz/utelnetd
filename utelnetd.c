@@ -40,7 +40,8 @@
 #define USE_SYSLOG 	1
 #define USE_ISSUE	1
 
-
+#define _GNU_SOURCE
+#define _XOPEN_SOURCE 600
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -48,21 +49,7 @@
 #include <sys/ioctl.h>
 #include <string.h>
 #include <unistd.h>
-
-/* we need getpty() */
-#define __USE_GNU 1
-#define __USE_XOPEN 1
 #include <stdlib.h>
-#undef __USE_GNU
-#undef __USE_XOPEN
-
-// These don't get included from stdlib.h on modern Ubuntu. Don't know
-//   why. Anyway, guessing the prototype of ptsname() causes the compiler
-//   to generate broken code, so the definition needs to be there.
-extern int unlockpt (int fd);
-extern int grantpt (int fd);
-extern char *ptsname (int fd);
-
 #include <errno.h>
 #include <netinet/in.h>
 #include <fcntl.h>
@@ -75,9 +62,9 @@ extern char *ptsname (int fd);
 
 #include <termios.h>
 
-#ifdef BSD
+#ifdef __FreeBSD__ || __NetBSD__ || __OpenBSD__
 #define XTABS OXTABS
-#define getpty() posix_openpt(O_RDWR|O_NOCTTY)
+#define getpt() posix_openpt(O_RDWR|O_NOCTTY)
 #endif
 
 #ifdef DEBUG
@@ -96,6 +83,8 @@ extern char *ptsname (int fd);
 #endif
 
 #define MIN(a,b) ((a) > (b) ? (b) : (a))
+
+#define SHELLPATH "/bin/ash"
 
 static char *loginpath = NULL;
 
@@ -119,11 +108,9 @@ struct tsession {
 #define DEBUG_OUT(...) fprintf(stderr, __VA_ARGS__)
 #else
 #define DEBUG_OUT(...)
-//static inline void DEBUG_OUT(const char *format, ...) {};
 #endif
 
 /*
-
    This is how the buffers are used. The arrows indicate the movement
    of data.
 
@@ -156,7 +143,7 @@ void show_usage(void)
 	printf("   -p port          specify the tcp port to connect to\n");
 	printf("   -i interface     specify the network interface to listen on\n");
 	printf("                    (default: all interfaces)\n");
-	printf("   -l loginprogram  program started by the server\n");
+	printf("   -l loginprogram  program started by the server (default: /bin/ash)\n");
 	printf("   -d               daemonize\n");
 	printf("   -n               don't show /etc/issue\n");
 	printf("\n");         
@@ -165,7 +152,7 @@ void show_usage(void)
 
 void perror_msg_and_die(char *text)
 {
-	fprintf (stderr, "%s", text);
+	perror(text);
 	exit(1);
 }
 
@@ -185,7 +172,7 @@ void error_msg_and_die(char *text)
    and make *processed equal to the number of characters that were actually
    processed and *num_totty the number of characters that should be sent to
    the terminal.  
-   
+    
    Note - If an IAC (3 byte quantity) starts before (bf + len) but extends
    past (bf + len) then that IAC will be left unprocessed and *processed will be
    less than len.
@@ -205,16 +192,26 @@ remove_iacs(unsigned char *bf, int len, int *processed, int *num_totty) {
 	    *totty++ = *ptr++;
 	}
 	else {
-	    if ((ptr+2) < end) {
-		/* the entire IAC is contained in the buffer 
-		   we were asked to process. */
-		DEBUG_OUT("Ignoring IAC 0x%02x, %s, %s\n", *ptr, TELCMD(*(ptr+1)), TELOPT(*(ptr+2)));
-		ptr += 3;
-	    } else {
-		/* only the beginning of the IAC is in the 
-		   buffer we were asked to process, we can't
-		   process this char. */
-		break;
+	    if ((ptr+1) < end) {
+	        if (*(ptr + 1) == IAC) {
+	            /* Escaped IAC, send single IAC to totty */
+	            *totty++ = IAC;
+	            ptr += 2;
+	        }
+	        else if ((ptr+2) < end) {
+	            /* the entire IAC is contained in the buffer 
+	               we were asked to process. */
+	            DEBUG_OUT("Ignoring IAC 0x%02x, %s, %s\n", *ptr, TELCMD(*(ptr+1)), TELOPT(*(ptr+2)));
+	            ptr += 3;
+	        }
+	        else {
+	            /* Incomplete IAC sequence */
+	            break;
+	        }
+	    }
+	    else {
+	        /* Incomplete IAC sequence */
+	        break;
 	    }
 	}
     }
@@ -229,23 +226,32 @@ remove_iacs(unsigned char *bf, int len, int *processed, int *num_totty) {
 
 static int getpty(char *line)
 {
-        int p;
+    int p;
+    char *pty_name;
 
-        p = getpty();
-        if (p < 0) {
-                DEBUG_OUT("getpty(): couldn't get pty\n");
-                close(p);
-                return -1;
-        }
-        if (grantpt(p)<0 || unlockpt(p)<0) {
-                DEBUG_OUT("getpty(): couldn't grant and unlock pty\n");
-                close(p);
-                return -1;
-        }
-        DEBUG_OUT("getpty(): got pty %s\n",ptsname(p));
-        strcpy(line, (const char*)ptsname(p));
+    p = posix_openpt(O_RDWR | O_NOCTTY);
+    if (p < 0) {
+        DEBUG_OUT("getpty(): couldn't open pty\n");
+        return -1;
+    }
+    if (grantpt(p) < 0 || unlockpt(p) < 0) {
+        DEBUG_OUT("getpty(): couldn't grant and unlock pty\n");
+        close(p);
+        return -1;
+    }
 
-        return(p);
+    pty_name = ptsname(p);
+    if (pty_name == NULL) {
+        DEBUG_OUT("getpty(): ptsname() failed\n");
+        close(p);
+        return -1;
+    }
+
+    strncpy(line, pty_name, MAX_PTY_NAME_LEN - 1);
+    line[MAX_PTY_NAME_LEN - 1] = '\0'; // Ensure null-termination
+
+    DEBUG_OUT("getpty(): got pty %s\n", line);
+    return p;
 }
 
 
@@ -267,18 +273,27 @@ make_new_session (int sockfd, int use_issue)
 {
 	struct termios termbuf;
 	int pty, pid;
-	static char tty_name[32];
-	struct tsession *ts = (struct tsession *)malloc(sizeof(struct tsession));
-	//int t1, t2;
-#ifdef USE_ISSUE
-	FILE *fp;
-	int chr;
-#endif
-	ts->buf1 = (char *)malloc(BUFSIZE);
-	ts->buf2 = (char *)malloc(BUFSIZE);
+	#define TTY_NAME_SIZE 64
+	static char tty_name[TTY_NAME_SIZE];
+	struct tsession *ts = calloc(1, sizeof(struct tsession));
+	if (!ts) {
+		perror("calloc");
+		return NULL;
+	}
+
+	ts->buf1 = calloc(1, BUFSIZE);
+	ts->buf2 = calloc(1, BUFSIZE);
+	if (!ts->buf1 || !ts->buf2) {
+		perror("calloc");
+		free(ts->buf1);
+		free(ts->buf2);
+		free(ts);
+		return NULL;
+	}
 
 	ts->sockfd = sockfd;
 
+	/* Initialize buffer indices */
 	ts->rdidx1 = ts->wridx1 = ts->size1 = 0;
 	ts->rdidx2 = ts->wridx2 = ts->size2 = 0;
 
@@ -287,8 +302,8 @@ make_new_session (int sockfd, int use_issue)
 	pty = getpty(tty_name);
 
 	if (pty < 0) {
-		fprintf(stderr, "All network ports in use!\n");
-		return 0;
+		fprintf(stderr, "Failed to allocate pty for new session.\n");
+		return NULL;
 	}
 
 	if (pty > maxfd)
@@ -310,6 +325,8 @@ make_new_session (int sockfd, int use_issue)
 
 	if ((pid = fork()) < 0) {
 		perror("fork");
+		free_session(ts);
+		return NULL;
 	}
 	if (pid == 0) {
 		/* In child, open the child's side of the tty.  */
@@ -322,14 +339,15 @@ make_new_session (int sockfd, int use_issue)
 		if (setsid() < 0)
 			perror_msg_and_die("setsid");
 		t = open(tty_name, O_RDWR | O_NOCTTY);
-		//t = open(tty_name, O_RDWR);
 		if (t < 0)
 			perror_msg_and_die("Could not open tty");
 
-		/* t1 = */ dup(0);
-		/* t2 = */ dup(1);
+		/* Duplicate file descriptors */
+		if (dup2(t, STDIN_FILENO) < 0) perror_msg_and_die("dup2 stdin");
+		if (dup2(t, STDOUT_FILENO) < 0) perror_msg_and_die("dup2 stdout");
+		if (dup2(t, STDERR_FILENO) < 0) perror_msg_and_die("dup2 stderr");
 
-		tcsetpgrp(0, getpid());
+		/* Set controlling terminal */
 		if (ioctl(t, TIOCSCTTY, NULL)) {
 			perror_msg_and_die("could not set controlling tty");
 		} 
@@ -346,10 +364,13 @@ make_new_session (int sockfd, int use_issue)
 		/* termbuf.c_lflag &= ~ICANON; */
 		tcsetattr(t, TCSANOW, &termbuf);
 
-		DEBUG_OUT("stdin, stdout, stderr: %d %d %d\n", t, t1, t2);
+		DEBUG_OUT("stdin, stdout, stderr: %d %d %d\n", STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO);
 #ifdef USE_ISSUE
                 if (use_issue)
 		{
+			/* Display ISSUE_FILE */
+			FILE *fp;
+			int chr;
 			/* Display ISSUE_FILE */
 			if ((fp = fopen(ISSUE_FILE, "r")) != NULL) {
 				DEBUG_OUT(" Open & start display %s\n", ISSUE_FILE);
@@ -370,6 +391,10 @@ make_new_session (int sockfd, int use_issue)
 
 	ts->shell_pid = pid;
 
+	/* Link the new session into the sessions list */
+	ts->next = sessions;
+	sessions = ts;
+
 	return ts;
 }
 
@@ -382,9 +407,10 @@ free_session(struct tsession *ts)
 	if(t == ts)
 		sessions = ts->next;
 	else {
-		while(t->next != ts)
+		while(t->next != ts && t->next != NULL)
 			t = t->next;
-		t->next = ts->next;
+		if (t->next == ts)
+			t->next = ts->next;
 	}
 
 	free(ts->buf1);
@@ -397,10 +423,18 @@ free_session(struct tsession *ts)
 	close(ts->ptyfd);
 	close(ts->sockfd);
 
-	if(ts->ptyfd == maxfd || ts->sockfd == maxfd)
-		maxfd--;
-	if(ts->ptyfd == maxfd || ts->sockfd == maxfd)
-		maxfd--;
+	/* Recalculate maxfd */
+	if(ts->ptyfd == maxfd || ts->sockfd == maxfd) {
+		maxfd = 0;
+		struct tsession *s = sessions;
+		while(s) {
+			if(s->ptyfd > maxfd)
+				maxfd = s->ptyfd;
+			if(s->sockfd > maxfd)
+				maxfd = s->sockfd;
+			s = s->next;
+		}
+	}
 
 	free(ts);
 }
@@ -411,11 +445,9 @@ int main(int argc, char **argv)
 	int master_fd;
 	fd_set rdfdset, wrfdset;
 	int selret;
-        int no_issue = 0; // Don't print /etc/issue on new session
-	int on = 1;
+    int no_issue = 0; // Don't print /etc/issue on new session
 	int portnbr = 23;
-	int c, ii;
-	int daemonize = 0;
+	int c;
 	char *interface_name = NULL;
 	struct ifreq interface;
 
@@ -428,9 +460,7 @@ int main(int argc, char **argv)
 
 	/* check if user supplied a port number */
 
-	for (;;) {
-		c = getopt( argc, argv, "i:p:l:hdn");
-		if (c == EOF) break;
+	while ((c = getopt(argc, argv, "i:p:l:hdn")) != -1) {
 		switch (c) {
 			case 'p':
 				portnbr = atoi(optarg);
@@ -456,16 +486,15 @@ int main(int argc, char **argv)
 
 	if (!loginpath) {
 		loginpath = SHELLPATH;
-		if (access(loginpath, X_OK) < 0) loginpath = "/bin/sh";
 	}
-	  
+
 	if (access(loginpath, X_OK) < 0) {
 		/* workaround: error_msg_and_die has doesn't understand
- 		   variable argument lists yet */
+		   variable argument lists yet */
 		fprintf(stderr,"\"%s\"",loginpath);
 		perror_msg_and_die(" is no valid executable!\n");
 	}
-
+	  
 	printf("telnetd: starting\n");
 	printf("  port: %i; interface: %s; login program: %s\n",
 		portnbr, (interface_name)?interface_name:"any", loginpath);
@@ -497,7 +526,7 @@ int main(int argc, char **argv)
 		/* use ioctl() here as BSD does not have setsockopt() */
 		if (ioctl(master_fd, SIOCGIFADDR, &interface) < 0) {
 			printf("Please check the NIC you specified with -i option\n");
-			perror("ioctl SIOCGFADDR");
+			perror("ioctl SIOCGIFADDR");
 			return 1;
 		}
 
@@ -523,12 +552,15 @@ int main(int argc, char **argv)
 
 #ifdef USE_SYSLOG
 	openlog(appname , LOG_NDELAY | LOG_PID, LOG_DAEMON);	
-	syslog(LOG_INFO, "%s (port: %i, ifname: %s, login: %s) startup succeeded\n"\
-	    , appname, portnbr, (interface_name)?interface_name:"any", loginpath);
+	syslog(LOG_INFO, "%s (port: %i, ifname: %s, login: %s) startup succeeded\n",
+	    appname, portnbr, (interface_name)?interface_name:"any", loginpath);
 	closelog();
 #endif
 
 	maxfd = master_fd;
+
+	/* Handle SIGCHLD to prevent zombie processes */
+	signal(SIGCHLD, SIG_IGN);
 
 	do {
 		struct tsession *ts;
@@ -562,15 +594,19 @@ int main(int argc, char **argv)
 			ts = ts->next;
 		}
 
-		selret = select(maxfd + 1, &rdfdset, &wrfdset, 0, 0);
+		selret = select(maxfd + 1, &rdfdset, &wrfdset, NULL, NULL);
 
-		if (!selret)
+		if (selret < 0) {
+			if (errno == EINTR)
+				continue; // Interrupted by signal, retry
+			perror("select");
 			break;
+		}
 
 		/* First check for and accept new sessions.  */
 		if (FD_ISSET(master_fd, &rdfdset)) {
 			int fd; 
-                        socklen_t salen;
+            socklen_t salen;
 
 			salen = sizeof(sa);	
 			if ((fd = accept(master_fd, (struct sockaddr *)&sa,
@@ -586,8 +622,6 @@ int main(int argc, char **argv)
 #endif
 				new_ts = make_new_session(fd, !no_issue);
 				if (new_ts) {
-					new_ts->next = sessions;
-					sessions = new_ts;
 					if (fd > maxfd)
 						maxfd = fd;
 				} else {
@@ -603,7 +637,7 @@ int main(int argc, char **argv)
 			int maxlen, w, r;
 			struct tsession *next = ts->next; /* in case we free ts. */
 
-			if (ts->size1 && FD_ISSET(ts->ptyfd, &wrfdset)) {
+			if (ts->size1 > 0 && FD_ISSET(ts->ptyfd, &wrfdset)) {
 			    int processed, num_totty;
 			    char *ptr;
 				/* Write to pty from buffer 1.  */
@@ -633,7 +667,7 @@ int main(int argc, char **argv)
 					ts->wridx1 = 0;
 			}
 
-			if (ts->size2 && FD_ISSET(ts->sockfd, &wrfdset)) {
+			if (ts->size2 > 0 && FD_ISSET(ts->sockfd, &wrfdset)) {
 				/* Write to socket from buffer 2.  */
 				maxlen = MIN(BUFSIZE - ts->wridx2,
 					     ts->size2);
@@ -681,7 +715,7 @@ int main(int argc, char **argv)
 					ts = next;
 					continue;
 				}
-				for (ii=0; ii < r; ii++)
+				for (int ii = 0; ii < r; ii++)
 				  if (*(ts->buf2 + ts->rdidx2 + ii) == 3)
 				    fprintf(stderr, "found <CTRL>-<C> in data!\n");
 				ts->rdidx2 += r;
