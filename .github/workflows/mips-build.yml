@@ -37,7 +37,7 @@ jobs:
           wget https://downloads.openwrt.org/snapshots/targets/ramips/mt7621/openwrt-toolchain-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
           unzstd openwrt-toolchain-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
           tar -xf openwrt-toolchain-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar
-          echo "TOOLCHAIN_DIR=$(pwd)/openwrt-toolchain-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64/staging_dir/toolchain-ramips-mt7621_gcc-13.3.0_musl/bin" >> $GITHUB_ENV
+          echo "TOOLCHAIN_DIR=$(pwd)/openwrt-toolchain-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64/bin" >> $GITHUB_ENV
 
       # Step 5: Add Toolchain to PATH
       - name: Add Toolchain to PATH
