@@ -1,0 +1,40 @@
+name: Cross-Compile utelnetd for MIPS32
+
+# Trigger the workflow on push to any branch and on manual triggers
+on:
+  push:
+    branches: 
+      - '**'  # Triggers on push to any branch
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+
+    steps:
+      # Step 1: Checkout the repository
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      # Step 2: Install the MIPS cross-compiler
+      - name: Install MIPS Cross-Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mips-linux-gnu
+
+      # Step 3: Compile utelnetd.c for MIPS32
+      - name: Compile utelnetd.c
+        run: |
+          mips-linux-gnu-gcc utelnetd.c -o utelnetd
+
+      # Step 4: Verify the binary (optional but recommended)
+      - name: Verify Binary Architecture
+        run: |
+          file utelnetd
+
+      # Step 5: Upload the compiled binary as an artifact
+      - name: Upload utelnetd Binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: utelnetd-mips32
+          path: utelnetd
