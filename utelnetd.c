@@ -106,6 +106,8 @@ struct tsession {
 
 /* Prototypes for static functions */
 static void free_session(struct tsession *ts);  // Added function declaration
+static void show_usage(void);  // Added function declaration
+static void perror_msg_and_die(const char *text);  // Added function declaration
 
 #ifdef DEBUG
 #define DEBUG_OUT(...) fprintf(stderr, __VA_ARGS__)
@@ -145,6 +147,18 @@ static int getpty(char *line)
 
     DEBUG_OUT("getpty(): got pty %s\n", line);
     return p;
+}
+
+static void show_usage(void)
+{
+    printf("Usage: telnetd [-p port] [-i interface] [-l loginprogram] [-d] [-n] [-h]\n");
+    exit(1);
+}
+
+static void perror_msg_and_die(const char *text)
+{
+    perror(text);
+    exit(1);
 }
 
 int main(int argc, char **argv)
